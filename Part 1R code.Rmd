@@ -1,0 +1,157 @@
+---
+title: "Question 1 R code"
+output:
+  html_document: default
+  pdf_document: default
+date: "2025-03-07"
+---
+
+## Part 1(a) Sampling using Random Walk Metropolis-Hastings
+
+```{r}
+# Fix seed for reproducibility
+set.seed(123)
+```
+
+```{r}
+# Define the target probability density function
+laplace_pdf <- function(x) {
+  return (0.5 * exp(-abs(x)))
+}
+```
+
+```{r}
+#Implementation Metropolis-Hastings random walk
+mh_sampler <- function(N, s, x0 = 0) {
+  output1 <- numeric(N)
+  output1[1] <- x0
+  
+  for (i in 2:N) {
+    proposal_x_star <- rnorm(1, mean = output1[i - 1], sd = s)
+    acceptance_ratio1 <- laplace_pdf(proposal_x_star) / laplace_pdf(output1[i - 1])
+    
+    if (log(runif(1)) < log(acceptance_ratio1)) {
+      output1[i] <- proposal_x_star
+    } else {
+      output1[i] <- output1[i - 1]
+    }
+  }
+  
+  return(output1)
+}
+
+```
+
+```{r}
+# Draw samples from the Laplace distribution using MH algorithm
+N <- 10000
+s <- 1
+chain <- mh_sampler(N, s)
+```
+
+```{r}
+# wrap result in a data frame for plotting
+result_df <- data.frame(draws = chain)
+```
+
+```{r}
+library(ggplot2)
+
+
+# Sequence for true density curve
+x_values <- seq(-5, 5, length.out = 1000)
+reference1 <- data.frame(x = x_values, y = laplace_pdf(x_values))
+
+# Create plot with legend style
+plot1 <- ggplot(result_df, aes(x = draws)) +
+  
+  # Histogram
+  geom_histogram(aes(y = ..density.., fill = "Sample Histogram"), bins = 50, color = "black", alpha = 0.5) +
+  
+  # Kernel Density Estimate (KDE)
+  geom_density(aes(color = "Kernel density estimate"), size = 1) +
+  
+  # True Laplace PDF
+  geom_line(data = reference1, aes(x = x, y = y, linetype = "True Distribution f(x)"), color = "green", size = 1) +
+  
+  # Customize legend style
+  scale_fill_manual(name = "", values = c("Sample Histogram" = "skyblue")) +
+  scale_color_manual(name = "", values = c("Kernel density estimate" = "orange")) +
+  scale_linetype_manual(name = "", values = c("True Distribution f(x)" = "dashed")) +
+  
+  # Labels and title
+  labs(title = "Metropolis-Hastings Sampling", x = "X", y = "Density") +
+  theme_minimal() +
+  
+  # Position legend at top
+  theme(legend.position = "top")
+
+# Display the plot
+print(plot1)
+
+```
+
+```{r}
+# Estimate Monte Carlo mean and standard deviation
+mean_est <- mean(chain)
+sd_est <- sd(chain)
+cat("Monte Carlo Mean:", mean_est, "\n")
+cat("Monte Carlo SD:", sd_est, "\n")
+```
+
+## Part 1(b) Convergence Diagnostic (R-hat)
+
+```{r}
+# Define funtion to calculate R-hat statistic
+rhat_statistic <- function(N, s, J, init_values) {
+  all_chains <- matrix(NA, nrow = N, ncol = J)
+  
+  for (j in 1:J) {
+    all_chains[, j] <- mh_sampler(N, s, init_values[j])
+  }
+  
+  Mj <- colMeans(all_chains)
+  Vj <- apply(all_chains, 2, var)
+  
+  W <- mean(Vj)
+  M <- mean(Mj)
+  B <- mean((Mj - M)^2)
+  
+  R_hat_value <- sqrt((B + W) / W)
+  return(R_hat_value)
+}
+```
+
+```{r}
+# evaluate R-hat across different step sizes
+s_values <- seq(0.001, 1, length.out = 50)
+R_hat_values <- sapply(s_values, function(s) rhat_statistic(N = 2000, s = s, J = 4, init_values = c(-5, 0, 5, 10)))
+```
+
+```{r}
+# organize results for plotting
+rhat_data <- data.frame(s_values, R_hat_values)
+
+# visualization of R-hat against step size
+p <- ggplot(rhat_data, aes(x = s_values, y = R_hat_values)) +
+  
+  # R-hat curve
+  geom_line(aes(color = "R-hat"), size = 1) +
+  
+  # Threshold line at 1.05
+  geom_hline(aes(yintercept = 1.05, linetype = "Threshold (1.05)"), color = "red", size = 1) +
+  
+  # Customize legend
+  scale_color_manual(name = "", values = c("R-hat" = "blue")) +
+  scale_linetype_manual(name = "", values = c("Threshold (1.05)" = "dashed")) +
+  
+  # Labels and theme
+  labs(title = "R-hat vs Step Size", x = "Step size (s)", y = "R-hat") +
+  theme_minimal() +
+  
+  # Position legend at top-right
+  theme(legend.position = "top")
+
+# Display the plot
+print(p)
+```
