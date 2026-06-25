@@ -1,0 +1,412 @@
+---
+title: "Question Part 2 R code"
+output: html_document
+date: "2025-03-18"
+---
+
+## Part 2
+
+```{r}
+# Load necessary libraries
+library(DBI)
+library(RSQLite)
+library(readr)
+library(dplyr)
+```
+
+```{r}
+# Create and Connect to the Database
+conn <- dbConnect(SQLite(), dbname = "flights_r.db")
+```
+
+```{r}
+# Read CSV files
+airports <- read_csv("airports.csv", show_col_types = FALSE)
+carriers <- read_csv("carriers.csv", show_col_types = FALSE)
+planes <- read_csv("plane-data.csv", show_col_types = FALSE)
+
+# Write tables to SQL Database
+dbWriteTable(conn, "airports", airports, overwrite = TRUE)
+dbWriteTable(conn, "carriers", carriers, overwrite = TRUE)
+dbWriteTable(conn, "planes", planes, overwrite = TRUE)
+```
+
+```{r}
+# Create the "ontime" table
+dbExecute(conn, "DROP TABLE IF EXISTS ontime")
+dbExecute(conn, "
+    CREATE TABLE ontime (
+        Year INTEGER,
+        Month INTEGER,
+        DayofMonth INTEGER,
+        DayofWeek INTEGER,
+        DepTime INTEGER,
+        CRSDepTime INTEGER,
+        ArrTime INTEGER,
+        CRSArrTime INTEGER,
+        UniqueCarrier TEXT,
+        FlightNum INTEGER,
+        TailNum TEXT,
+        ActualElapsedTime INTEGER,
+        CRSElapsedTime INTEGER,
+        AirTime INTEGER,
+        ArrDelay INTEGER,
+        DepDelay INTEGER,
+        Origin TEXT,
+        Dest TEXT,
+        Distance INTEGER,
+        TaxiIn INTEGER,
+        TaxiOut INTEGER,
+        Cancelled INTEGER,
+        CancellationCode TEXT,
+        Diverted INTEGER,
+        CarrierDelay INTEGER,
+        WeatherDelay INTEGER,
+        NASDelay INTEGER,
+        SecurityDelay INTEGER,
+        LateAircraftDelay INTEGER
+    )
+")
+```
+
+```{r}
+#Load data from compressed CSV files
+for (year in 2001:2005) {
+    filename <- paste0(year, ".csv.bz2")
+    cat("Processing:", filename, "\n")
+    
+    # Read CSV with appropriate options
+    ontime <- suppressWarnings(read_csv(filename, locale = locale(encoding = "latin1"), show_col_types = FALSE))
+    
+    # Append to SQLite database
+dbWriteTable(conn, "ontime", ontime, append = TRUE)
+}
+
+```
+
+## Part 2(a) Best Times and Days to Minimize Delays
+
+```{r}
+library(ggplot2)
+```
+
+```{r, fig.width=10, fig.height=4}
+# Query: Average delay by departure time (in minutes)
+query_time <- "
+    SELECT (CAST(DepTime / 100 AS INTEGER) + (DepTime % 100) / 60.0) AS DepHour,
+           AVG(ArrDelay) AS AvgDelay
+    FROM ontime
+    WHERE ArrDelay IS NOT NULL AND DepTime IS NOT NULL AND DepTime >= 0 AND DepTime < 2400
+    GROUP BY DepHour
+    ORDER BY DepHour;
+"
+
+# Execute query
+flights_time <- dbGetQuery(conn, query_time)
+
+# Convert delay from minutes to hours
+flights_time$AvgDelayHours <- flights_time$AvgDelay / 60
+
+# Plot delay by departure time (in hours)
+library(ggplot2)
+
+ggplot(flights_time, aes(x = DepHour, y = AvgDelayHours)) +
+    geom_line(color = "blue") +
+    labs(title = "Average Arrival Delay by Departure Hour",
+         x = "Hour of Departure",
+         y = "Average Arrival Delay (hours)") +
+    scale_x_continuous(breaks = seq(0, 25, 1)) +
+    scale_y_continuous(limits = c(0, 15)) +
+    theme_minimal()+
+    theme(
+      plot.title = element_text(size = 14, face = "bold"),
+      axis.title = element_text(size = 12),
+      axis.text = element_text(size = 10)
+    )
+
+
+```
+
+```{r}
+# SQL Query: Average delay by day of the week
+query_day <- "
+  SELECT DayofWeek, AVG(ArrDelay) AS AvgDelay
+  FROM ontime
+  WHERE ArrDelay IS NOT NULL
+  GROUP BY DayofWeek
+  ORDER BY DayofWeek;
+"
+
+# Run SQL command and load output into a dataframe
+flights_day <- dbGetQuery(conn, query_day)
+
+# Convert numeric day values to weekday names
+day_mapping <- c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+flights_day <- flights_day %>%
+  mutate(DayofWeek = factor(DayofWeek, levels = 1:7, labels = day_mapping))
+
+# Visualize average delay across weekdays
+ggplot(flights_day, aes(x = DayofWeek, y = AvgDelay)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  labs(title = "Average Arrival Delay by Day of the Week",
+       x = "Day of the Week", 
+       y = "Average Arrival Delay (minutes)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  geom_text(aes(label = round(AvgDelay, 1)), vjust = -0.5, size = 4)
+
+```
+
+## Part 2(b) Are Older Planes Have More Delays?
+
+```{r}
+library(broom)   # For extracting model coefficients
+```
+
+```{r}
+# SQL Query: Relationship between aircraft age and delay
+query <- "
+SELECT f.Year AS Year,
+       f.Year - p.year AS PlaneAge,
+       AVG(f.ArrDelay) AS AvgDelay
+FROM ontime f
+JOIN planes p ON f.TailNum = p.tailnum
+WHERE f.ArrDelay IS NOT NULL
+  AND p.year IS NOT NULL
+  AND f.Year BETWEEN 2001 AND 2005
+GROUP BY f.Year, PlaneAge
+ORDER BY f.Year, PlaneAge;
+"
+
+# Run SQL command and load output into a dataframe
+df_yearly <- dbGetQuery(conn, query)
+
+# Filter unreasonable data
+df_filtered <- df_yearly %>%
+  filter(PlaneAge >= 0, PlaneAge < 50)
+
+# Plot: Faceted by Year
+ggplot(df_filtered, aes(x = PlaneAge, y = AvgDelay)) +
+  geom_point(alpha = 0.5, size = 2) +
+  geom_smooth(method = "lm", se = FALSE, color = "red") +
+  facet_wrap(~Year, ncol = 3) +
+  labs(
+    title = "Aircraft Age vs Arrival Delay by Year",
+    x = "Aircraft Age (Years)",
+    y = "Average Arrival Delay (Minutes)"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 14, face = "bold")
+  )
+
+```
+
+```{r}
+# Compute slope for each year
+slopes_df <- df_filtered %>%
+  group_by(Year) %>%
+  do({
+    model <- lm(AvgDelay ~ PlaneAge, data = .)
+    slope <- coef(model)["PlaneAge"]
+    data.frame(Slope = slope)
+  }) %>%
+  ungroup()
+
+# Plot: Slope (Beta) per year
+ggplot(slopes_df, aes(x = Year, y = Slope)) +
+  geom_line() +
+  geom_point(size = 3, color = "steelblue") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray") +
+  labs(
+    title = "Yearly Regression Slopes: Aircraft Age vs Delay",
+    x = "Year",
+    y = "Slope (Beta)"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5)
+  )
+```
+
+## Part 2 (c) Logistic Regression for Diverted Flights
+
+```{r}
+library(DBI)
+library(RSQLite)
+library(dplyr)
+library(caret)
+library(pROC)
+library(smotefamily)
+library(glmnet)
+library(Matrix)
+library(ggplot2)
+```
+
+```{r}
+# Define features
+numerical_features <- c(
+  "Month", "DayofMonth", "DayofWeek", "DepTime", "CRSDepTime", 
+  "ArrTime", "CRSArrTime", "Distance"
+)
+categorical_features <- c("UniqueCarrier")
+
+
+# Result containers
+coef_results <- list()
+all_metrics <- data.frame()
+plot_coef_df <- data.frame()
+
+```
+
+```{r}
+# Count diverted = 0 and 1 per year
+cat("Flight Diversion Counts by Year:\n")
+for (year in years) {
+  query <- paste0("SELECT Diverted FROM ontime WHERE Year = ", year)
+  df <- dbGetQuery(conn, query)
+  cat(sprintf("Year %d:\n", year))
+  print(table(df$Diverted))
+}
+```
+
+```{r}
+# Loop over years
+for (year in 2001:2005) {
+  cat("\nProcessing Year:", year, "\n")
+  
+  query <- paste0(
+    "SELECT Year, ", paste(c(numerical_features, categorical_features, "Diverted"), collapse = ", "),
+    " FROM ontime WHERE Year = ", year, ";"
+  )
+  
+  result <- dbSendQuery(conn, query)
+  chunk_size <- 100000
+  all_data <- data.frame()
+  
+  while (!dbHasCompleted(result)) {
+    chunk <- dbFetch(result, n = chunk_size)
+    all_data <- rbind(all_data, chunk)
+  }
+  dbClearResult(result)
+  
+  total_rows <- nrow(all_data)
+  cat("Total Rows Processed:", total_rows, "\n")
+  
+  if (total_rows == 0 || !"Diverted" %in% colnames(all_data)) {
+    warning(paste("Skipping year", year, "- no valid data"))
+    next
+  }
+  
+  # Preprocessing
+  all_data$Diverted <- as.factor(all_data$Diverted)
+  X <- all_data[, c(numerical_features, categorical_features), drop = FALSE]
+  y <- all_data$Diverted
+  
+  X[numerical_features] <- lapply(X[numerical_features], function(x) ifelse(is.na(x), mean(x, na.rm = TRUE), x))
+  X[numerical_features] <- lapply(X[numerical_features], scale)
+  X[categorical_features] <- lapply(X[categorical_features], function(x) ifelse(is.na(x), "missing", x))
+  
+  X_matrix <- model.matrix(~ . - 1, data = X)
+  X <- as.data.frame(X_matrix)
+  all_feature_names <- colnames(X)
+  
+  set.seed(42)
+  train_index <- createDataPartition(y, p = 0.8, list = FALSE)
+  X_train <- X[train_index, ]
+  y_train <- y[train_index]
+  X_test <- X[-train_index, ]
+  y_test <- y[-train_index]
+  
+  y_train_num <- as.numeric(as.character(y_train))
+  smote_out <- SMOTE(X_train, y_train_num, K = 5, dup_size = 0)
+  X_train_bal <- smote_out$data[, -ncol(smote_out$data)]
+  y_train_bal <- smote_out$data[, ncol(smote_out$data)]
+  
+  lambda_val <- 1e-5
+  model <- glmnet(as.matrix(X_train_bal), y_train_bal, family = "binomial", alpha = 0, lambda = lambda_val)
+  
+  coef_mat <- as.matrix(coef(model, s = lambda_val))
+  coef_mat <- coef_mat[rownames(coef_mat) != "(Intercept)", , drop = FALSE]
+  
+  coef_vector <- rep(0, length(all_feature_names))
+  names(coef_vector) <- all_feature_names
+  intersecting_names <- intersect(rownames(coef_mat), all_feature_names)
+  coef_vector[intersecting_names] <- coef_mat[intersecting_names, 1]
+
+  coef_df <- data.frame(
+    Feature = names(coef_vector),
+    Coefficient = coef_vector,
+    Year = as.factor(year)
+  )
+
+  coef_results[[as.character(year)]] <- coef_df
+  plot_coef_df <- rbind(plot_coef_df, coef_df)
+
+  y_pred_prob <- predict(model, newx = as.matrix(X_test), type = "response")
+  y_pred <- ifelse(y_pred_prob > 0.5, 1, 0)
+  y_actual <- as.numeric(as.character(y_test))
+
+  acc <- mean(y_pred == y_actual)
+  rec <- sum(y_pred == 1 & y_actual == 1) / sum(y_actual == 1)
+  auc <- roc(y_actual, as.numeric(y_pred_prob))$auc
+
+  all_metrics <- rbind(all_metrics, data.frame(Year = year, Accuracy = acc, Recall = rec, AUC = auc))
+  cat(sprintf("Year %d | Accuracy: %.4f, Recall: %.4f, AUC: %.4f\n", year, acc, rec, auc))
+
+  rm(all_data, X, y, X_train, y_train, X_test, y_test, smote_out,
+     X_train_bal, y_train_bal, model, coef_df, coef_mat, coef_vector, y_pred, y_pred_prob, y_actual)
+  gc()
+}
+
+dbDisconnect(conn)
+
+cat("\nModel Performance Summary:\n")
+print(all_metrics)
+```
+
+```{r}
+# Generate full ordered feature list
+all_feature_names <- unique(plot_coef_df$Feature)  # all features from model
+ordered_features <- c(
+  numerical_features,
+  grep(paste0("^", categorical_features), all_feature_names, value = TRUE)
+)
+
+# Select first 9 features from defined order that appear in coef list
+selected_9_features <- ordered_features[ordered_features %in% all_feature_names][1:9]
+
+# Expand all year-feature combinations
+plot_df_filtered <- merge(
+  expand.grid(
+    Feature = selected_9_features,
+    Year = unique(plot_coef_df$Year)
+  ),
+  plot_coef_df,
+  by = c("Feature", "Year"),
+  all.x = TRUE
+)
+
+plot_df_filtered$Coefficient[is.na(plot_df_filtered$Coefficient)] <- 0
+plot_df_filtered$Feature <- factor(plot_df_filtered$Feature, levels = selected_9_features)
+
+# Plot
+library(ggplot2)
+
+ggplot(plot_df_filtered, aes(x = Feature, y = Coefficient, group = Year, color = Year)) +
+  geom_line(aes(linetype = Year)) +
+  geom_point(size = 2) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.title = element_text(size = 14, face = "bold")
+  ) +
+  labs(
+    title = "Coefficient by Feature (Lines = Year)",
+    x = "Feature",
+    y = "Coefficient Value"
+  ) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray")
+
+
+```
